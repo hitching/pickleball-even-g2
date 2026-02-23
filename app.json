@@ -1,0 +1,14 @@
+{
+  "package_id": "com.pickleball.eveng2",
+  "edition": "202601",
+  "name": "Pickleball",
+  "version": "1.0.0",
+  "min_app_version": "0.1.0",
+  "tagline": "Pickleball scorer and assistant for G2 glasses",
+  "description": "A pickleball scoring and game assistant app for Even Realities G2 smart glasses.",
+  "author": "",
+  "entrypoint": "index.html",
+  "permissions": {
+    "network": ["*"]
+  }
+}
