@@ -1,5 +1,9 @@
-node_modules/
-dist/
-*.ehpk
-.env
-.env.local
+g2-app/node_modules/
+g2-app/dist/
+g2-app/*.ehpk
+g2-app/.env
+g2-app/.env.local
+
+backend/node_modules/
+backend/cdk.out/
+backend/.env
