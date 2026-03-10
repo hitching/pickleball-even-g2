@@ -81,3 +81,9 @@ After `cdk deploy`, set in `g2-app/.env`:
 ```
 VITE_API_URL=<API Gateway URL from CDK output>
 ```
+
+---
+
+## Plan Storage
+When creating plans, always save them to `.claude/plans/` in the repo root.
+Use descriptive filenames like `YYYY-MM-DD-feature-description.md`.
