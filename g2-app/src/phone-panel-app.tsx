@@ -396,8 +396,14 @@ function TrendsTable({ rates }: { rates: TrendsRates }) {
       return d.getFullYear() === col.year && d.getMonth() === col.month
     }).length
   )
+  const gamesLostPerMonth = cols.map(col =>
+    rates.finishedGames.filter(g => {
+      if (!g.gameStartTime) return false
+      const d = new Date(g.gameStartTime)
+      return d.getFullYear() === col.year && d.getMonth() === col.month && deriveOutcome(g) === 'lose'
+    }).length
+  )
   const rows: [string, number | null][] = [
-    ['Games Won',       rates.gamesWonRate],
     ['Points Won - Serve',  rates.serveRate],
     ['Points Won - Back',   rates.backRate],
     ['Points Won - Receive',rates.receiveRate],
@@ -430,6 +436,22 @@ function TrendsTable({ rates }: { rates: TrendsRates }) {
                   {cols.map((_, ci) => (
                     <td key={ci} style={{ textAlign: 'center', padding: '4px 6px', color: '#94a3b8' }}>
                       {gamesPerMonth[ci] > 0 ? String(gamesPerMonth[ci]) : '—'}
+                    </td>
+                  ))}
+                </tr>
+                <tr>
+                  <td style={{ padding: '4px 6px', color: '#64748b', fontWeight: 500 }}>Games Won</td>
+                  {cols.map((_, ci) => (
+                    <td key={ci} style={{ textAlign: 'center', padding: '4px 6px', color: '#94a3b8' }}>
+                      {ci === 0 ? (rates.gamesWonRate !== null ? `${rates.gamesWonRate}%` : '—') : '—'}
+                    </td>
+                  ))}
+                </tr>
+                <tr>
+                  <td style={{ padding: '4px 6px', color: '#64748b', fontWeight: 500 }}>Games Lost</td>
+                  {cols.map((_, ci) => (
+                    <td key={ci} style={{ textAlign: 'center', padding: '4px 6px', color: '#94a3b8' }}>
+                      {gamesLostPerMonth[ci] > 0 ? String(gamesLostPerMonth[ci]) : '—'}
                     </td>
                   ))}
                 </tr>
