@@ -4,9 +4,8 @@
 
 import { type Config, type GameState, DEFAULT_CONFIG } from './state'
 
-const CONFIG_KEY     = 'pb-config'
-const GAMES_KEY      = 'pb-games'
-const READ_ALOUD_KEY = 'pb-read-aloud'
+const CONFIG_KEY = 'pb-config'
+const GAMES_KEY  = 'pb-games'
 
 export const MAX_LOCAL_GAMES = 2
 
@@ -41,10 +40,3 @@ export function saveGame(s: GameState): void {
   try { window.localStorage.setItem(GAMES_KEY, JSON.stringify(games)) } catch { /* ignore */ }
 }
 
-export function loadReadAloud(): boolean {
-  try { return localStorage.getItem(READ_ALOUD_KEY) !== 'false' } catch { return true }
-}
-
-export function saveReadAloud(v: boolean): void {
-  try { localStorage.setItem(READ_ALOUD_KEY, String(v)) } catch { /* ignore */ }
-}

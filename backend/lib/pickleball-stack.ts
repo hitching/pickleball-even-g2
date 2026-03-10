@@ -6,6 +6,11 @@ import * as lambda from 'aws-cdk-lib/aws-lambda'
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2'
 import * as apigatewayv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations'
 import * as apigatewayv2Authorizers from 'aws-cdk-lib/aws-apigatewayv2-authorizers'
+import * as s3         from 'aws-cdk-lib/aws-s3'
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront'
+import * as origins    from 'aws-cdk-lib/aws-cloudfront-origins'
+import * as s3deploy   from 'aws-cdk-lib/aws-s3-deployment'
+import * as acm        from 'aws-cdk-lib/aws-certificatemanager'
 import { Construct } from 'constructs'
 import * as path from 'path'
 
@@ -159,6 +164,78 @@ export class PickleballStack extends cdk.Stack {
     })
 
     // -------------------------------------------------------------------------
+    // ACM Certificates — DNS validation (non-blocking: attach in next deploy)
+    // -------------------------------------------------------------------------
+
+    const frontendCert = new acm.CfnCertificate(this, 'FrontendCert', {
+      domainName:       'pickleball.hitching.net',
+      validationMethod: 'DNS',
+    })
+
+    const apiCert = new acm.CfnCertificate(this, 'ApiCert', {
+      domainName:       'pickleball-api.hitching.net',
+      validationMethod: 'DNS',
+    })
+
+    // -------------------------------------------------------------------------
+    // S3 — private bucket for static site assets
+    // -------------------------------------------------------------------------
+
+    const siteBucket = new s3.Bucket(this, 'SiteBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      removalPolicy:     cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      enforceSSL:        true,
+    })
+
+    // -------------------------------------------------------------------------
+    // CloudFront — OAC distribution, SPA fallback, HTTPS-only
+    // -------------------------------------------------------------------------
+
+    const distribution = new cloudfront.Distribution(this, 'SiteDistribution', {
+      defaultBehavior: {
+        origin:         origins.S3BucketOrigin.withOriginAccessControl(siteBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        cachedMethods:  cloudfront.CachedMethods.CACHE_GET_HEAD,
+        cachePolicy:    cloudfront.CachePolicy.CACHING_OPTIMIZED,
+      },
+      defaultRootObject: 'index.html',
+      errorResponses: [
+        { httpStatus: 403, responseHttpStatus: 200, responsePagePath: '/index.html', ttl: cdk.Duration.seconds(0) },
+        { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html', ttl: cdk.Duration.seconds(0) },
+      ],
+      priceClass:  cloudfront.PriceClass.PRICE_CLASS_100,
+      domainNames: ['pickleball.hitching.net'],
+      certificate: acm.Certificate.fromCertificateArn(this, 'FrontendCertRef', frontendCert.ref),
+    })
+
+    // -------------------------------------------------------------------------
+    // BucketDeployment — sync dist/ to S3 + invalidate CloudFront on deploy
+    // -------------------------------------------------------------------------
+
+    new s3deploy.BucketDeployment(this, 'DeploySite', {
+      sources:           [s3deploy.Source.asset(path.join(__dirname, '../../g2-app/dist'))],
+      destinationBucket: siteBucket,
+      distribution,
+      distributionPaths: ['/index.html'],
+    })
+
+    // -------------------------------------------------------------------------
+    // API Gateway custom domain — pickleball-api.hitching.net
+    // -------------------------------------------------------------------------
+
+    const apiDomain = new apigatewayv2.DomainName(this, 'ApiDomain', {
+      domainName:  'pickleball-api.hitching.net',
+      certificate: acm.Certificate.fromCertificateArn(this, 'ApiCertRef', apiCert.ref),
+    })
+
+    new apigatewayv2.ApiMapping(this, 'ApiMapping', {
+      api:        httpApi,
+      domainName: apiDomain,
+    })
+
+    // -------------------------------------------------------------------------
     // Stack outputs
     // -------------------------------------------------------------------------
 
@@ -177,6 +254,26 @@ export class PickleballStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'GamesTableName', {
       value: gamesTable.tableName,
+    })
+
+    new cdk.CfnOutput(this, 'CloudFrontUrl', {
+      value:       `https://${distribution.distributionDomainName}`,
+      description: 'CloudFront URL for the React app',
+    })
+
+    new cdk.CfnOutput(this, 'FrontendCertArn', {
+      value:       frontendCert.ref,
+      description: 'ACM cert for pickleball.hitching.net — attach to CloudFront after validation',
+    })
+
+    new cdk.CfnOutput(this, 'ApiCertArn', {
+      value:       apiCert.ref,
+      description: 'ACM cert for pickleball-api.hitching.net — attach to API Gateway after validation',
+    })
+
+    new cdk.CfnOutput(this, 'ApiDomainTarget', {
+      value:       apiDomain.regionalDomainName,
+      description: 'Point pickleball-api.hitching.net CNAME here',
     })
   }
 }

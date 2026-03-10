@@ -13,7 +13,7 @@ import '@jappyjan/even-realities-ui/styles.css';
 
 import { type Config, type GameState, type RallyHit, type MyRole, type PointOutcome, deriveOutcome, deriveMyRole } from './state'
 import { loadGames, MAX_LOCAL_GAMES } from './storage'
-import { sendCode, verifyCode, clearToken, isAuthenticated, getAuthEmail, fetchStats } from './api'
+import { sendCode, verifyCode, clearToken, isAuthenticated, getAuthEmail, fetchStats, postGame } from './api'
 
 // ---------------------------------------------------------------------------
 // Public interface (mirrors the old phone-panel.ts)
@@ -21,11 +21,9 @@ import { sendCode, verifyCode, clearToken, isAuthenticated, getAuthEmail, fetchS
 
 export interface PhonePanelOptions {
   getState: () => GameState
-  getReadAloud: () => boolean
   getCurrentRallyHits: () => RallyHit[]
   onUndo: () => void
   onConfigChange: (c: Config) => void
-  onReadAloudChange: (v: boolean) => void
 }
 
 export interface PhonePanelHandle {
@@ -72,6 +70,25 @@ function formatElapsed(startTime: number | null): string {
   const m = Math.floor(ms / 60000)
   const s = Math.floor((ms % 60000) / 1000)
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+function formatGameDate(ts: number | null): string {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  let h = d.getHours()
+  const min = String(d.getMinutes()).padStart(2, '0')
+  const ampm = h >= 12 ? 'pm' : 'am'
+  h = h % 12 || 12
+  return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()} ${h}:${min}${ampm}`
+}
+
+function formatDuration(start: number | null, end: number | null): string {
+  if (!start) return ''
+  const ms = (end ?? Date.now()) - start
+  const m = Math.floor(ms / 60000)
+  const s = Math.floor((ms % 60000) / 1000)
+  return `${m}:${String(s).padStart(2, '0')}`
 }
 
 function compactScore(state: GameState): string {
@@ -167,13 +184,9 @@ function SettingsRow({ label, children }: { label: string; children: React.React
 function SettingsTab({
   config,
   onConfigChange,
-  readAloud,
-  onReadAloudChange,
 }: {
   config: Config
   onConfigChange: (c: Config) => void
-  readAloud: boolean
-  onReadAloudChange: (v: boolean) => void
 }) {
   return (
     <div className="flex flex-col gap-3">
@@ -211,8 +224,8 @@ function SettingsTab({
           </SettingsRow>
           <Switch
             label="Read scores aloud"
-            checked={readAloud}
-            onChange={e => onReadAloudChange(e.target.checked)}
+            checked={config.readAloud}
+            onChange={e => onConfigChange({ ...config, readAloud: e.target.checked })}
           />
           <Switch
             label="Detect rally stats using microphone"
@@ -356,31 +369,39 @@ function gameScoreLabel(g: GameState): string {
   return `${g.myScore} \u2013 ${g.oppScore}`
 }
 
-function lastSixMonths(): string[] {
+function lastSixMonths(): { label: string; year: number; month: number }[] {
   const names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
   const now = new Date()
   return Array.from({ length: 6 }, (_, i) => {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
-    return names[d.getMonth()]
+    return { label: names[d.getMonth()], year: d.getFullYear(), month: d.getMonth() }
   })
 }
 
 interface TrendsRates {
-  gamesWonRate: number | null
-  serveRate:    number | null
-  backRate:     number | null
-  receiveRate:  number | null
-  netRate:      number | null
+  gamesWonRate:  number | null
+  serveRate:     number | null
+  backRate:      number | null
+  receiveRate:   number | null
+  netRate:       number | null
+  finishedGames: GameState[]
 }
 
 function TrendsTable({ rates }: { rates: TrendsRates }) {
   const cols = lastSixMonths()
+  const gamesPerMonth = cols.map(col =>
+    rates.finishedGames.filter(g => {
+      if (!g.gameStartTime) return false
+      const d = new Date(g.gameStartTime)
+      return d.getFullYear() === col.year && d.getMonth() === col.month
+    }).length
+  )
   const rows: [string, number | null][] = [
     ['Games Won',       rates.gamesWonRate],
-    ['Points - Serve',  rates.serveRate],
-    ['Points - Back',   rates.backRate],
-    ['Points - Receive',rates.receiveRate],
-    ['Points - Net',    rates.netRate],
+    ['Points Won - Serve',  rates.serveRate],
+    ['Points Won - Back',   rates.backRate],
+    ['Points Won - Receive',rates.receiveRate],
+    ['Points Won - Net',    rates.netRate],
   ]
   return (
     <>
@@ -392,18 +413,26 @@ function TrendsTable({ rates }: { rates: TrendsRates }) {
               <thead>
                 <tr>
                   <th style={{ textAlign: 'left', padding: '4px 6px', color: '#94a3b8' }}></th>
-                  {cols.map((m, ci) => (
+                  {cols.map((col, ci) => (
                     <th key={ci} style={{
                       textAlign: 'center', padding: '4px 6px',
                       color: ci === 0 ? '#64748b' : '#94a3b8',
                       fontWeight: ci === 0 ? 600 : 500,
                     }}>
-                      {m}
+                      {col.label}
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
+                <tr>
+                  <td style={{ padding: '4px 6px', color: '#64748b', fontWeight: 500 }}>Games Played</td>
+                  {cols.map((_, ci) => (
+                    <td key={ci} style={{ textAlign: 'center', padding: '4px 6px', color: '#94a3b8' }}>
+                      {gamesPerMonth[ci] > 0 ? String(gamesPerMonth[ci]) : '—'}
+                    </td>
+                  ))}
+                </tr>
                 {rows.map(([label, curRate]) => (
                   <tr key={label}>
                     <td style={{ padding: '4px 6px', color: '#64748b', fontWeight: 500 }}>{label}</td>
@@ -423,6 +452,11 @@ function TrendsTable({ rates }: { rates: TrendsRates }) {
   )
 }
 
+function mergeGames(cloud: GameState[], local: GameState[]): GameState[] {
+  const cloudTimes = new Set(cloud.map(g => g.gameStartTime))
+  return [...cloud, ...local.filter(g => !cloudTimes.has(g.gameStartTime))]
+}
+
 function DataTab({ state, currentRallyHits, onGoToAccount }: { state: GameState; currentRallyHits: RallyHit[]; onGoToAccount: () => void }) {
   const [cloudGames, setCloudGames] = useState<GameState[] | null>(null)
 
@@ -431,9 +465,16 @@ function DataTab({ state, currentRallyHits, onGoToAccount }: { state: GameState;
     fetchStats().then(setCloudGames).catch(() => {})
   }, [])
 
-  const completedGames = cloudGames ?? loadGames()
+  const localGames = loadGames()
+  const completedGames = cloudGames == null ? localGames : mergeGames(cloudGames, localGames)
   const sparklineGames = state.history.length > 0 ? [...completedGames, state] : completedGames
-  const gamesToShow = state.mode === 'play' ? [state, ...completedGames] : completedGames
+  const sortedCompleted = [...completedGames].sort(
+    (a, b) => (b.gameStartTime ?? 0) - (a.gameStartTime ?? 0)
+  )
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
+  const todayCount = sortedCompleted.filter(g => (g.gameStartTime ?? 0) >= todayStart.getTime()).length
+  const cappedCompleted = sortedCompleted.slice(0, Math.max(10, todayCount))
+  const gamesToShow = state.mode === 'play' ? [state, ...cappedCompleted] : cappedCompleted
 
   if (!sparklineGames.length && !gamesToShow.length) {
     return (
@@ -594,7 +635,15 @@ function DataTab({ state, currentRallyHits, onGoToAccount }: { state: GameState;
           {gamesToShow.map((g, i) => (
             <Card key={i}>
               <CardContent className="flex flex-col gap-2">
-                <Text variant="body-2">{gameScoreLabel(g)}</Text>
+                <div className="flex justify-between items-baseline">
+                  <Text variant="body-2">{gameScoreLabel(g)}</Text>
+                  <Text variant="detail" style={{ color: '#94a3b8' }}>
+                    <>
+                      {formatGameDate(g.gameStartTime)}
+                      {g.gameStartTime && ` +${formatDuration(g.gameStartTime, g.endTime)}`}
+                    </>
+                  </Text>
+                </div>
                 <GameScoreGraph game={g} />
               </CardContent>
             </Card>
@@ -602,7 +651,7 @@ function DataTab({ state, currentRallyHits, onGoToAccount }: { state: GameState;
         </>
       )}
 
-      <TrendsTable rates={{ gamesWonRate, serveRate, backRate, receiveRate, netRate }} />
+      <TrendsTable rates={{ gamesWonRate, serveRate, backRate, receiveRate, netRate, finishedGames }} />
     </div>
   )
 }
@@ -642,6 +691,9 @@ function AccountTab() {
       await verifyCode(email.trim(), code.trim())
       setStep('signedIn')
       setCode('')
+      for (const game of loadGames()) {
+        postGame(game).catch(() => {})
+      }
     } catch {
       setError('Invalid code. Please try again.')
     } finally {
@@ -753,8 +805,6 @@ function PhoneApp({ opts }: { opts: PhonePanelOptions }) {
         <SettingsTab
           config={state.config}
           onConfigChange={opts.onConfigChange}
-          readAloud={opts.getReadAloud()}
-          onReadAloudChange={opts.onReadAloudChange}
         />
       )}
       {tab === 'stats' && <DataTab state={state} currentRallyHits={opts.getCurrentRallyHits()} onGoToAccount={() => setTab('account')} />}

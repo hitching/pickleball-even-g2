@@ -32,6 +32,7 @@ export interface Config {
   listenDetectStats: boolean   // keep mic on for full rally; store per-rally stats
   minimizeAfterSecs: boolean   // whether the auto-timeout applies; false = stay full until manual toggle
   showScoreOnCompact: boolean  // show score in compact mode; false = blank/dark display
+  readAloud: boolean           // read scores aloud after each point
 }
 
 /** Shared court-position state — base for Point and GameState. */
@@ -140,11 +141,12 @@ export const DEFAULT_CONFIG: Config = {
   pointsToWin: 11,
   needTwoPointLead: true,
   alwaysStartOnRight: true,
-  fullDisplaySecs: 10,
-  listenHideDisplay: false,
-  listenDetectStats: false,
+  fullDisplaySecs: 5,
+  listenHideDisplay: true,
+  listenDetectStats: true,
   minimizeAfterSecs: true,
   showScoreOnCompact: true,
+  readAloud: false,
 }
 
 export function createInitialState(config: Config = DEFAULT_CONFIG): GameState {

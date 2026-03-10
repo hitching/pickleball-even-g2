@@ -9,7 +9,7 @@ export function playNumber(n: number): Promise<void> {
   const data = SOUNDS[n]
   if (!data) return Promise.resolve()
   return new Promise((resolve) => {
-    const audio = new Audio(`data:audio/wav;base64,${data}`)
+    const audio = new Audio(`data:audio/mpeg;base64,${data}`)
     audio.addEventListener('ended', () => resolve())
     audio.addEventListener('error', () => resolve())
     void audio.play().catch(() => resolve())

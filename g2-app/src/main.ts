@@ -42,7 +42,7 @@ import {
   undoOrReset,
   deriveMyRole,
 } from './state'
-import { loadConfig, saveConfig, saveGame, loadReadAloud, saveReadAloud } from './storage'
+import { loadConfig, saveConfig, saveGame } from './storage'
 import { isAuthenticated, postGame } from './api'
 import { playScoreAudio } from './audio'
 import { mountPhonePanel, type PhonePanelHandle } from './phone-panel-app'
@@ -61,7 +61,6 @@ let timerIntervalId: number | null = null
 let displayMode: 'compact' | 'full' = 'compact'
 let fullDisplayTimeoutId: number | null = null
 let audioActive = false       // monitoring mic activity for dynamic rally-end timing
-let readScoresAloud = false   // initialised in main() via loadReadAloud()
 
 // per-rally audio tracking state (reset on each mic activation via resetRallyState)
 let audioFrameCount     = 0
@@ -675,7 +674,7 @@ function registerEventLoop(b: EvenAppBridge): void {
             ? faultServe(state,  'they_win', prevRallyHitsTop)
             : scorePoint(state, 'they_win', prevRallyHitsTop)
           await showFullBriefly(b)
-          void playScoreAudio(state, () => readScoresAloud)
+          void playScoreAudio(state, () => state.config.readAloud)
         }
         panel.update()
         break
@@ -692,7 +691,7 @@ function registerEventLoop(b: EvenAppBridge): void {
             ? scorePoint(state, 'we_win', prevRallyHitsBottom)
             : faultServe(state,  'we_win', prevRallyHitsBottom)
           await showFullBriefly(b)
-          void playScoreAudio(state, () => readScoresAloud)
+          void playScoreAudio(state, () => state.config.readAloud)
         }
         panel.update()
         break
@@ -705,7 +704,7 @@ function registerEventLoop(b: EvenAppBridge): void {
           state = startGame(state, parseSetupOption(SERVE_OPTIONS[setupTeam][setupPos]))
           startPlayTimer(b)
           await showFullBriefly(b)
-          void playScoreAudio(state, () => readScoresAloud)
+          void playScoreAudio(state, () => state.config.readAloud)
           panel.update()
         } else {
           if (displayMode === 'compact') {
@@ -767,7 +766,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  readScoresAloud = loadReadAloud()
   state = createInitialState(loadConfig())
 
   try {
@@ -779,7 +777,6 @@ async function main(): Promise<void> {
 
   panel = mountPhonePanel(document.getElementById('app')!, {
     getState: () => state,
-    getReadAloud: () => readScoresAloud,
     getCurrentRallyHits: () => rallyStats,
     onUndo: () => {
       const prevMode = state.mode
@@ -799,11 +796,10 @@ async function main(): Promise<void> {
       }
       panel.update()
     },
-    onConfigChange: (c) => { state.config = c; saveConfig(c); panel.update() },
-    onReadAloudChange: (v) => {
-      readScoresAloud = v
-      saveReadAloud(v)
-      if (v) void playScoreAudio(state, () => readScoresAloud)
+    onConfigChange: (c) => {
+      state.config = c
+      saveConfig(c)
+      if (c.readAloud) void playScoreAudio(state, () => state.config.readAloud)
       panel.update()
     },
   })

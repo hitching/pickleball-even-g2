@@ -6,6 +6,7 @@ userId comes from the JWT sub claim, extracted by API Gateway's JWT authorizer.
 """
 import json
 import os
+from decimal import Decimal
 import boto3
 from boto3.dynamodb.conditions import Key
 
@@ -13,11 +14,18 @@ dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(os.environ["TABLE_NAME"])
 
 
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return int(obj) if obj % 1 == 0 else float(obj)
+        return super().default(obj)
+
+
 def response(status, body):
     return {
         "statusCode": status,
         "headers": {"Content-Type": "application/json"},
-        "body": json.dumps(body),
+        "body": json.dumps(body, cls=DecimalEncoder),
     }
 
 
