@@ -45,8 +45,10 @@ def handler(event, context):
             return response(401, {"error": "Invalid or expired code"})
         raise
 
-    id_token = result.get("AuthenticationResult", {}).get("IdToken")
+    auth_result = result.get("AuthenticationResult", {})
+    id_token = auth_result.get("IdToken")
     if not id_token:
         return response(401, {"error": "Authentication failed"})
 
-    return response(200, {"token": id_token})
+    refresh_token = auth_result.get("RefreshToken")
+    return response(200, {"token": id_token, "refreshToken": refresh_token})
