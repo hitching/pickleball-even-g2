@@ -114,13 +114,16 @@ VITE_API_URL=<ApiUrl from CDK output>
 ---
 
 ## Plan Storage
-
-When creating plans, always save them to `.claude/plans/` in the repo root.
-Use descriptive filenames like `YYYY-MM-DD-feature-description.md`.
-When saving plans, include frontmatter:
+Always save plans to `.claude/plans/YYYY-MM-DD-description.md` with frontmatter:
 - Date
-- Goal/objective  
+- Goal/objective
 - Status (draft | ready-for-review | in-progress)
-After saving any plan file run `hostname` to identify the environment, and when the hostname does not include the string `local` run the following:
-`git add .claude/plans/ && git commit -m "plan: <description>" && git push`
 
+Check if `~/.claude-local` exists (run `test -f ~/.claude-local && echo exists || echo does-not-exist`)
+
+If it **exists** (local): save the plan file then proceed with planning and implementation normally.
+
+If it **does-not-exist** (cloud): produce the plan content then propose only these actions for approval:
+- Write the plan to `.claude/plans/YYYY-MM-DD-description.md`
+- Run: `git add .claude/plans/ && git commit -m "plan: <description>" && git push`
+- Do not propose any implementation steps.
