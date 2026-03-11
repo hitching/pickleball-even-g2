@@ -13,7 +13,7 @@ import '@jappyjan/even-realities-ui/styles.css';
 
 import { type Config, type GameState, type RallyHit, type MyRole, type PointOutcome, deriveOutcome, deriveMyRole } from './state'
 import { loadGames, MAX_LOCAL_GAMES } from './storage'
-import { sendCode, verifyCode, clearToken, isAuthenticated, getAuthEmail, fetchStats, postGame } from './api'
+import { sendCode, verifyCode, clearToken, isAuthenticated, getAuthEmail, fetchStats, postGame, ensureFreshToken } from './api'
 
 // ---------------------------------------------------------------------------
 // Public interface (mirrors the old phone-panel.ts)
@@ -676,6 +676,15 @@ function AccountTab() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const signedInEmail = getAuthEmail()
+
+  // On mount, silently refresh the IdToken if it has expired.
+  // If the refresh token is also gone/expired, fall back to sign-in UI.
+  useEffect(() => {
+    if (!isAuthenticated()) return
+    ensureFreshToken().then(ok => {
+      if (!ok) setStep('idle')
+    })
+  }, [])
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
 
   async function handleSendCode() {

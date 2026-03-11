@@ -64,6 +64,10 @@ export class PickleballStack extends cdk.Stack {
     // ALLOW_USER_AUTH (EMAIL_OTP flow) isn't in CDK L2 types yet — set via L1 escape hatch
     const cfnClient = userPoolClient.node.defaultChild as cognito.CfnUserPoolClient
     cfnClient.explicitAuthFlows = ['ALLOW_USER_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH']
+    // RefreshToken valid for 90 days; IdToken valid for 24h (AWS maximum for IdToken)
+    cfnClient.refreshTokenValidity = 90
+    cfnClient.idTokenValidity = 1440   // minutes = 24h
+    cfnClient.tokenValidityUnits = { refreshToken: 'days', idToken: 'minutes' }
 
     // Enable EMAIL_OTP as a first-factor sign-in method — required for USER_AUTH + EMAIL_OTP
     // CDK L2 doesn't expose signInPolicy yet — use L1 escape hatch
@@ -83,8 +87,9 @@ export class PickleballStack extends cdk.Stack {
       CLIENT_ID:     userPoolClient.userPoolClientId,
     }
 
-    const sendCodeFn  = pyFn('SendCodeFn',  'auth/send-code',  sharedAuthEnv)
+    const sendCodeFn   = pyFn('SendCodeFn',   'auth/send-code',   sharedAuthEnv)
     const verifyCodeFn = pyFn('VerifyCodeFn', 'auth/verify-code', sharedAuthEnv)
+    const refreshFn    = pyFn('RefreshFn',    'auth/refresh',     sharedAuthEnv)
 
     // sendCode needs cognito:InitiateAuth, verifyCode needs cognito:RespondToAuthChallenge
     const cognitoAuthPolicy = new iam.PolicyStatement({
@@ -99,6 +104,7 @@ export class PickleballStack extends cdk.Stack {
     })
     sendCodeFn.addToRolePolicy(cognitoAuthPolicy)
     verifyCodeFn.addToRolePolicy(cognitoAuthPolicy)
+    refreshFn.addToRolePolicy(cognitoAuthPolicy)
 
     // -------------------------------------------------------------------------
     // Stats Lambdas
@@ -146,6 +152,12 @@ export class PickleballStack extends cdk.Stack {
       path: '/auth/verify',
       methods: [apigatewayv2.HttpMethod.POST],
       integration: new apigatewayv2Integrations.HttpLambdaIntegration('VerifyCodeIntegration', verifyCodeFn),
+    })
+
+    httpApi.addRoutes({
+      path: '/auth/refresh',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration: new apigatewayv2Integrations.HttpLambdaIntegration('RefreshIntegration', refreshFn),
     })
 
     // Protected stats routes
