@@ -1,59 +1,76 @@
-# pickleball-even-g2
+# g2-app — Even Realities G2 glasses app
 
-Pickleball scoring and assistant app for Even Realities G2 smart glasses.
+Vite + React + TypeScript app for the pickleball scorer. Runs on Even Realities G2 smart glasses (G2 display) and in the browser (phone panel).
+
+---
 
 ## Development environment
 
-This app runs inside **even-dev**, a multi-app simulator environment located at:
+This app runs inside **even-dev**, a multi-app simulator located at:
 
 ```
 /Users/ritahitching/even-dev
 ```
 
-To launch this app via even-dev:
+Launch via even-dev:
 
 ```bash
 cd /Users/ritahitching/even-dev
 ./start-even.sh pickleball
 ```
 
-This app is registered as a local path in `/Users/ritahitching/even-dev/apps.json`:
+Registered as an external app in `/Users/ritahitching/even-dev/apps.json`:
 
 ```json
-"pickleball": "/Users/ritahitching/pickleball-even-g2"
+"pickleball": "/Users/ritahitching/pickleball-even-g2/g2-app"
 ```
 
 Even-dev serves this app's `index.html` through its Vite dev server with the Even Hub Simulator attached.
 
-## Key documentation
+> **Important**: This is an **external** standalone app with its own `index.html` and `src/main.ts`. Do **not** copy the `AppModule` export pattern used by built-in even-dev apps.
 
-- **G2 development notes** (reverse-engineered SDK reference): https://github.com/nickustinov/even-g2-notes/blob/main/G2.md
-- **even-dev README**: `/Users/ritahitching/even-dev/README.md` — explains how apps are loaded, the built-in app contract, external apps, and Vite plugins
+---
 
-## even-dev sample apps to reference
+## npm scripts
 
-All sample apps are in `/Users/ritahitching/even-dev/apps/`. Key examples:
+```bash
+npm run dev               # Vite dev server (usually launched via even-dev, not directly)
+npm run build             # Vite production build → dist/
+npm run qr                # Generate QR code for Even App on phone
+npm run pack              # build + package as pickleball.ehpk
+npm run compress-sounds   # Recompress WAV sounds to MP3 via ffmpeg (regenerates sounds.ts)
+```
 
-| App | Path | What it demonstrates |
-|-----|------|----------------------|
-| `base_app` | `/Users/ritahitching/even-dev/apps/base_app/` | Full pattern: bridge init, `createStartUpPageContainer`, text + list containers, event handling, browser UI panel, mock fallback |
-| `timer` | `/Users/ritahitching/even-dev/apps/timer/` | Countdown timer — text container updates, click/double-click events |
-| `clock` | `/Users/ritahitching/even-dev/apps/clock/` | Periodic refresh with `textContainerUpgrade` |
-| `restapi` | `/Users/ritahitching/even-dev/apps/restapi/` | REST API calls, multi-file structure, model/ui separation |
+---
 
-Shared types used by built-in apps: `/Users/ritahitching/even-dev/apps/_shared/app-types.ts`
+## App manifest (`app.json`)
 
-> Note: built-in apps export an `AppModule` from `index.ts` and share even-dev's `index.html`/`src/main.ts` loader. This app is an **external** standalone app with its own `index.html` and `src/main.ts` — do not copy the `AppModule` pattern.
+```json
+{
+  "package_id": "net.hitching.pickleball",
+  "edition": "202601",
+  "name": "Pickleball",
+  "version": "1.0.1",
+  "entrypoint": "index.html",
+  "permissions": {
+    "network": ["pickleball-api.hitching.net"]
+  }
+}
+```
+
+---
 
 ## G2 display constraints (critical)
 
-- Canvas: **576×288 px** per eye, 4-bit greyscale (16 shades of green)
-- Max **4 containers per page** (text, list, or image)
+- Canvas: **576×288 px** per eye, **4-bit greyscale** (16 shades of green)
+- Max **4 containers per page** (text, list, or image types)
 - Exactly **one** container must have `isEventCapture: 1`
-- No CSS, no flexbox — containers are positioned with pixel coordinates
-- Text is left-aligned only, single fixed font, `\n` for line breaks
-- List containers: max 20 items, firmware handles scroll highlighting natively
-- `CLICK_EVENT = 0` normalises to `undefined` — always check both
+- **No CSS or flexbox** — all containers positioned with pixel coordinates
+- Text is **left-aligned only**, single fixed-width font, `\n` for line breaks
+- List containers: max 20 items; firmware handles scroll highlighting natively
+- `CLICK_EVENT = 0` normalises to `undefined` — always check for both `0` and `undefined`
+
+---
 
 ## SDK
 
@@ -68,11 +85,98 @@ import { waitForEvenAppBridge } from '@evenrealities/even_hub_sdk'
 const bridge = await waitForEvenAppBridge()
 ```
 
-## npm scripts
+---
 
-```bash
-npm run dev    # Vite dev server (usually launched via even-dev, not directly)
-npm run build  # production build
-npm run qr     # QR code for Even App on phone
-npm run pack   # build + package as pickleball.ehpk
+## Source file overview
+
+| File | Purpose |
+|------|---------|
+| `src/main.ts` | G2 glasses entry point — bridge init, display rendering, input events, audio hit detection |
+| `src/phone-panel-app.tsx` | React phone panel — Game, Stats, Settings, Account tabs |
+| `src/state.ts` | Game state types (`GameState`, `CourtState`, `Config`, etc.) and transition functions |
+| `src/api.ts` | Backend API client — auth flow and stats sync |
+| `src/storage.ts` | localStorage persistence (config + last 2 games; `MAX_LOCAL_GAMES = 2`) |
+| `src/audio.ts` | Score readout via Web Audio API (plays base64 MP3s) |
+| `src/sounds.ts` | Base64-encoded MP3 audio for numbers 0–20 (generated by `compress-sounds.mjs`) |
+| `src/styles.css` | Tailwind CSS entry |
+
+---
+
+## Game state (`src/state.ts`)
+
+Key types:
+- `Side`: `'left' | 'right'`
+- `Team`: `'us' | 'them'`
+- `Mode`: `'setup' | 'play'`
+- `MyRole`: `'serve' | 'back' | 'receive' | 'net'`
+- `Config`: game settings (pointsToWin, needTwoPointLead, alwaysStartOnRight, etc.)
+- `GameState`: full game state including scores, mode, server, history, rally data
+
+Key functions:
+- `createInitialState()` — new GameState from config
+- `startGame(s)` — transition from setup → play
+- `scorePoint(s, team)` — increment score, handle side-out
+- `faultServe(s)` — advance server 2 → side-out
+- `undoOrReset(s)` — undo last action or reset to setup
+- `checkWin(s)` — determine if game is over
+
+Default config: `pointsToWin=11`, `needTwoPointLead=true`, `alwaysStartOnRight=true`, `fullDisplaySecs=5`
+
+---
+
+## G2 display rendering (`src/main.ts`)
+
+Two UI modes:
+- **Setup mode**: Scrollable list of court positions (16 images × 2 servers); shows who serves first
+- **Play mode (full)**: Score header, timer, server info; shown for `fullDisplaySecs` after each point
+- **Play mode (compact)**: Minimal score display (e.g. `5–3 S2 →`) for ongoing play
+
+Input events:
+- **Scroll up** → our point
+- **Scroll down** → their point
+- **Double-click** → undo last action / reset to setup if game over
+
+Audio hit detection constants:
+- `SAMPLE_RATE = 16000` Hz (microphone input)
+- `HIT_DEBOUNCE_MS = 250`
+- `RALLY_END_MIN_MS = 3000`
+
+---
+
+## Phone panel (`src/phone-panel-app.tsx`)
+
+Tab-based React UI using `@jappyjan/even-realities-ui` components and Tailwind CSS:
+
+- **Game tab**: Current rally sparkline (SVG), compact score, elapsed time, undo button
+- **Stats tab**: Game history from localStorage and backend API
+- **Settings tab**: Game config (pointsToWin, win-by-2, first serve, read aloud, mic detection, HUD settings)
+- **Account tab**: Email authentication, token management, upload/sync games to backend
+
+---
+
+## API client (`src/api.ts`)
+
+```ts
+// Token helpers
+getToken() / setToken(token) / clearToken() / isAuthenticated()
+getAuthEmail()   // Decodes email from JWT
+
+// Auth flow (Cognito EMAIL_OTP)
+sendCode(email)              // POST /auth/send-code → stores session in _pendingSession
+verifyCode(email, code)      // POST /auth/verify → returns and stores JWT
+
+// Stats
+fetchStats()                 // GET /stats → GameState[]
+postGame(game)               // POST /stats → uploads completed game
 ```
+
+`VITE_API_URL` env var sets the API base URL (required — set from CDK output).
+
+---
+
+## Reference documentation
+
+- **G2 development notes** (reverse-engineered SDK reference): https://github.com/nickustinov/even-g2-notes/blob/main/G2.md
+- **even-dev README**: `/Users/ritahitching/even-dev/README.md`
+- **even-dev sample apps**: `/Users/ritahitching/even-dev/apps/` (base_app, timer, clock, restapi)
+- **Shared types**: `/Users/ritahitching/even-dev/apps/_shared/app-types.ts`
