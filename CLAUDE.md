@@ -87,3 +87,10 @@ VITE_API_URL=<API Gateway URL from CDK output>
 ## Plan Storage
 When creating plans, always save them to `.claude/plans/` in the repo root.
 Use descriptive filenames like `YYYY-MM-DD-feature-description.md`.
+When saving plans, include frontmatter:
+- Date
+- Goal/objective  
+- Status (draft | ready-for-review | in-progress)
+After saving any plan file run `hostname` to identify the environment, and when the hostname does not include the string `local` run the following:
+`git add .claude/plans/ && git commit -m "plan: <description>" && git push`
+
