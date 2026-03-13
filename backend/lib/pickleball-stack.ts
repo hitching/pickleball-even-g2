@@ -234,17 +234,27 @@ export class PickleballStack extends cdk.Stack {
     })
 
     // -------------------------------------------------------------------------
-    // API Gateway custom domain — pickleball-api.hitching.net
+    // CloudFront in front of API — compression + edge termination
+    // Custom domain pickleball-api.hitching.net lives here (not on API GW).
     // -------------------------------------------------------------------------
 
-    const apiDomain = new apigatewayv2.DomainName(this, 'ApiDomain', {
-      domainName:  'pickleball-api.hitching.net',
+    const apiDistribution = new cloudfront.Distribution(this, 'ApiDistribution', {
+      defaultBehavior: {
+        origin: new origins.HttpOrigin(
+          // apiEndpoint is https://id.execute-api.region.amazonaws.com — extract host
+          cdk.Fn.select(2, cdk.Fn.split('/', httpApi.apiEndpoint)),
+          { protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY },
+        ),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods:       cloudfront.AllowedMethods.ALLOW_ALL,
+        cachePolicy:          cloudfront.CachePolicy.CACHING_DISABLED,
+        // Forward all viewer headers (incl. Authorization) except Host
+        originRequestPolicy:  cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+        compress: true,
+      },
+      domainNames: ['pickleball-api.hitching.net'],
       certificate: acm.Certificate.fromCertificateArn(this, 'ApiCertRef', apiCert.ref),
-    })
-
-    new apigatewayv2.ApiMapping(this, 'ApiMapping', {
-      api:        httpApi,
-      domainName: apiDomain,
+      priceClass:  cloudfront.PriceClass.PRICE_CLASS_100,
     })
 
     // -------------------------------------------------------------------------
@@ -252,8 +262,13 @@ export class PickleballStack extends cdk.Stack {
     // -------------------------------------------------------------------------
 
     new cdk.CfnOutput(this, 'ApiUrl', {
-      value: httpApi.apiEndpoint,
-      description: 'Set as VITE_API_URL in g2-app/.env',
+      value:       `https://pickleball-api.hitching.net`,
+      description: 'Set as VITE_API_URL in g2-app/.env (CloudFront → API GW)',
+    })
+
+    new cdk.CfnOutput(this, 'ApiDistributionDomain', {
+      value:       apiDistribution.distributionDomainName,
+      description: 'Point pickleball-api.hitching.net CNAME here',
     })
 
     new cdk.CfnOutput(this, 'UserPoolId', {
@@ -280,12 +295,7 @@ export class PickleballStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'ApiCertArn', {
       value:       apiCert.ref,
-      description: 'ACM cert for pickleball-api.hitching.net — attach to API Gateway after validation',
-    })
-
-    new cdk.CfnOutput(this, 'ApiDomainTarget', {
-      value:       apiDomain.regionalDomainName,
-      description: 'Point pickleball-api.hitching.net CNAME here',
+      description: 'ACM cert for pickleball-api.hitching.net — attached to API CloudFront distribution',
     })
   }
 }

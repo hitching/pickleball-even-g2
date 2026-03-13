@@ -20,13 +20,13 @@ import {
   ImageContainerProperty,
   ImageRawDataUpdate,
   OsEventTypeList,
-  RebuildPageContainer,
   TextContainerProperty,
   TextContainerUpgrade,
-  waitForEvenAppBridge,
+  waitForEvenAppBridge, DeviceConnectType,
   type EvenAppBridge,
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk'
+import { SERVE_OPTIONS, COURT_HALVES, COURT_HALF_INDICES, BLANK_HALF } from './court-images'
 import './styles.css'
 import '@jappyjan/even-realities-ui/styles.css'
 import {
@@ -54,11 +54,11 @@ import { mountPhonePanel, type PhonePanelHandle } from './phone-panel-app'
 let state: GameState = createInitialState(loadConfig())
 let setupTeam: Team = 'us'   // Setup mode: which team serves at game start
 let setupPos: 0 | 1 = 0      // Setup mode: position toggle within serving team (0=left, 1=right)
-let startupRendered = false
+let activeLayout: 'full' | 'compact' | null = null
+let startupCreated = false
 let bridge: EvenAppBridge | null = null
 let eventLoopRegistered = false
 let timerIntervalId: number | null = null
-let displayMode: 'compact' | 'full' = 'compact'
 let fullDisplayTimeoutId: number | null = null
 let audioActive = false       // monitoring mic activity for dynamic rally-end timing
 
@@ -109,35 +109,6 @@ function normalizeEventType(raw: unknown): OsEventTypeList | undefined {
   return undefined
 }
 
-// ---------------------------------------------------------------------------
-// Setup images — one base64 string per config (0-3).
-// Images are shown in the right column of the Setup screen (85x138 px).
-// The G2 display is 4-bit greyscale — high-contrast images work best.
-// ---------------------------------------------------------------------------
-
-const COURT_IMAGES: { [key: string]: string } = {
-  'left-serve-1': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAaklEQVR4nGOw/w8DDxgUGIAASoyyhwcbI34ZkNQMQ/YPOPvHoHAPrdmDO/8yI7FZkdicSGxBJDbjIGMPfBgix689hAIDnOwXjz/A2c9j39fD2O/33d9PmH3AHkn8Pw42knpk8z8QdBuCDQDYOqA/w9HZBAAAAABJRU5ErkJggg==',
-  'left-serve-2': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAhElEQVR4nGOw/w8DDxgUGIAASoyyhwcbI34ZkNQMQ/YPOPvHoHAPrdmDO//yNyDYAg4ItoICknpS2UjmMCCZz4hkLxMSmwWJzYHEFkBiKyCx7R8gmT/gYYgcv/YQCgxwsl88/gBnP499Xw9jv993fz9h9gF7JPH/ONhI6pHN/0DQbQg2APsjo86N3KsIAAAAAElFTkSuQmCC',
-  'left-receive-1': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAbElEQVR4nGOw/w8DDxgUGIAASgwiNjMSmxWJzYnEFkRiMw4y9oCGIUb8MiCpGYbsH3D2j0HhHlqzh0D+HWVTwEaOX3sIBQY42S8ef4Czn8e+r4ex3++7v58w+4A9kvh/HGwk9cjmfyDoNgQbAIPjoD/ONVXXAAAAAElFTkSuQmCC',
-  'left-receive-2': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAhklEQVR4nGOw/w8DDxgUGIAASgwiNn8Dgi3ggGArKCCpJ5WNZA4DkvmMSPYyIbFZkNgcSGwBJLYCEtv+wcCHG8Qh6PHLgKRmGLJ/wNk/BoV7aM0eAvl3lE0BGzl+7SEUGOBkv3j8Ac5+Hvu+HsZ+v+/+fsLsA/ZI4v9xsJHUI5v/gaDbEGwA7gSjzi1r5TIAAAAASUVORK5CYII=',
-  'left-back-1': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAaklEQVR4nGOw/w8DDxgUGIAASoyyhwcbI34ZkNQMQ/YPOPvHoHAPrdlDIP8yI7FZkdicSGxBJDbjIGMPaBgix689hAIDnOwXjz/A2c9j39fD2O/33d9PmH3AHkn8Pw42knpk8z8QdBuCDQDXVKA/igiKRgAAAABJRU5ErkJggg==',
-  'left-back-2': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAg0lEQVR4nGOw/w8DDxgUGIAASoyyhwcbI34ZkNQMQ/YPOPvHoHAPrdlDIP/yNyDYAg4ItoICknpS2UjmMCCZz4hkLxMSmwWJzYHEFkBiKyCx7R8MfLgxoMevPYQCA5zsF48/wNnPY9/Xw9jv993fT5h9wB5J/D8ONpJ6ZPM/EHQbgg0A6HKjzstEGsAAAAAASUVORK5CYII=',
-  'left-net-1': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAb0lEQVR4nGOw/w8DDxgUGIAASgwONjMSmxWJzYnEFkRiMw4y9sCHIUb8MiCpGYbsH3D2j0HhHlqzkePXHkIhxLGxXzz+AGc/j31fD2O/33d/P2H2AXsk8f842Ejqkc3/QNBtSGwFCDXi2cjxO4wAAAfOm/+L/jHhAAAAAElFTkSuQmCC',
-  'left-net-2': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAiUlEQVR4nGOw/w8DDxgUGIAASgwONn8Dgi3ggGArKCCpJ5WNZA4DkvmMSPYyIbFZkNgcSGwBJLYCEtv+AZL5Ax6GGPHLgKRmGLJ/wNk/BoV7aM1Gjl97CIUQx8Z+8fgDnP089n09jP1+3/39hNkH7JHE/+NgI6lHNv8DQbchsRUg1IhnI8fvMAIAg7qfjiIVHlwAAAAASUVORK5CYII=',
-  'right-serve-1': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAZ0lEQVR4nGOw/w8DDxgUGIAASoyyhwcbI34ZkNQMQ/YPOPvHoHAPrdlDIP8yI7FZkdicSGxBJDbjIGMPaBgixy8Y2BPDfvH4A5z9PPZ9PYz9ft/9/YTZB+yRxP/jYCOpRzb/A3HuBABMHaA/Pv3XkwAAAABJRU5ErkJggg==',
-  'right-serve-2': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAgElEQVR4nGOw/w8DDxgUGIAASoyyhwcbI34ZkNQMQ/YPOPvHoHAPrdlDIP/yNyDYAg4ItoICknpS2UjmMCCZz4hkLxMSmwWJzYHEFkBiKyCx7R8MfLgxoMcvGNgTw37x+AOc/Tz2fT2M/X7f/f2E2QfskcT/42AjqUc2/wNx7gQAXTujzgU01FQAAAAASUVORK5CYII=',
-  'right-receive-1': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAaUlEQVR4nGOw/w8DDxgUGIAASgwONjMSmxWJzYnEFkRiMw4y9sCHIUb8MiCpGYbsH3D2j0HhHlqzB3f+HWVTykaOXzCwJ4b94vEHOPt57Pt6GPv9vvv7CbMP2COJ/8fBRlKPbP4H4twJAPmDoD/PULMfAAAAAElFTkSuQmCC',
-  'right-receive-2': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAg0lEQVR4nGOw/w8DDxgUGIAASgwONn8Dgi3ggGArKCCpJ5WNZA4DkvmMSPYyIbFZkNgcSGwBJLYCEtv+AZL5Ax6GGPHLgKRmGLJ/wNk/BoV7aM0e3Pl3lE0pGzl+wcCeGPaLxx/g7Oex7+th7Pf77u8nzD5gjyT+HwcbST2y+R+IcycAdX6jznqJgvcAAAAASUVORK5CYII=',
-  'right-back-1': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAZ0lEQVR4nGOw/w8DDxgUGIAASoyyhwcbI34ZkNQMQ/YPOPvHoHAPrdmDO/8yI7FZkdicSGxBJDbjIGMPfBgixy8Y2BPDfvH4A5z9PPZ9PYz9ft/9/YTZB+yRxP/jYCOpRzb/A3HuBABNA6A/9sjhigAAAABJRU5ErkJggg==',
-  'right-back-2': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAgUlEQVR4nGOw/w8DDxgUGIAASoyyhwcbI34ZkNQMQ/YPOPvHoHAPrdmDO//yNyDYAg4ItoICknpS2UjmMCCZz4hkLxMSmwWJzYHEFkBiKyCx7R8gmT/gYYgcv2BgTwz7xeMPcPbz2Pf1MPb7fff3E2YfsEcS/4+DjaQe2fwPxLkTAG/so85tNfT6AAAAAElFTkSuQmCC',
-  'right-net-1': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAa0lEQVR4nGOw/w8DDxgUGIAASgwiNjMSmxWJzYnEFkRiMw4y9oCGIUb8MiCpGYbsH3D2j0HhHlqzMeLXnhj2i8cf4Oznse/rYez3++7vJ8w+YI8k/h8HG0k9svkfSHGnApJ/RygbOX6HEQAAkOKb/+CH/g0AAAAASUVORK5CYII=',
-  'right-net-2': 'iVBORw0KGgoAAAANSUhEUgAAAFUAAACKAQMAAADhU5TjAAAABlBMVEUAAAD///+l2Z/dAAAAhUlEQVR4nGOw/w8DDxgUGIAASgwiNn8Dgi3ggGArKCCpJ5WNZA4DkvmMSPYyIbFZkNgcSGwBJLYCEtv+wcCHG8Qh6PHLgKRmGLJ/wNk/BoV7aM3GiF97YtgvHn+As5/Hvq+Hsd/vu7+fMPuAPZL4fxxsJPXI5n8gxZ0KSP4doWzk+B1GAAD7A5+O1srxiwAAAABJRU5ErkJggg=='
-}
-
-const SERVE_OPTIONS: Record<Team, [string, string]> = {
-  us:   ['left-back-2',    'right-serve-2'],
-  them: ['left-net-2',     'right-receive-2'],
-}
 
 function parseSetupOption(key: string): { myPosition: Side; servingTeam: Team } {
   const [position, role] = key.split('-')
@@ -166,54 +137,65 @@ function getSetupHint(): string {
 }
 
 // ---------------------------------------------------------------------------
-// G2 display — container builders
+// G2 display — container builder (shared by setup and play-full)
 // ---------------------------------------------------------------------------
 
-function buildSetupContainers(imageKey: string) {
-  const { servingTeam } = parseSetupOption(imageKey)
-  const usX   = servingTeam === 'us'   ? 10 : 50
-  const themX = servingTeam === 'them' ? 10 : 50
+// 8 spaces ≈ 40 px offset for the non-serving team's score line
+const SCORE_INDENT = '        ';
 
+// 24 spaces
+const WIN_SUFFIX = SCORE_INDENT + SCORE_INDENT + SCORE_INDENT + SCORE_INDENT + 'WIN';
+
+/** Combined score text: top line = them, bottom line = us.
+ *  Serving team is left-aligned (x=10); non-serving is indented by SCORE_INDENT. */
+function getScoreText(servingTeam: Team, myScore: number, oppScore: number, isGameOver: boolean): string {
+  const win = isGameOver
+  const themLine = (servingTeam === 'us' ? SCORE_INDENT : '') +
+    oppScore + (win && oppScore > myScore ? WIN_SUFFIX : '')
+  const usLine   = (servingTeam === 'them' ? SCORE_INDENT : '') +
+    myScore + (win && myScore > oppScore ? WIN_SUFFIX : '')
+  return `\n${themLine}\n\n\n${usLine}`
+}
+
+function buildContainers(scoreText: string, footerText: string) {
   return {
     containerTotalNum: 4,
     imageObject: [
       new ImageContainerProperty({
         containerID: 1,
-        containerName: 'pb-court-img',
+        containerName: 'pb-court-top',
         xPosition: 90,
-        yPosition: 10,
+        yPosition: 20,
         width: 85,
-        height: 138,
+        height: 69,
+      }),
+      new ImageContainerProperty({
+        containerID: 2,
+        containerName: 'pb-court-bottom',
+        xPosition: 90,
+        yPosition: 89,
+        width: 85,
+        height: 69,
       }),
     ],
     textObject: [
       new TextContainerProperty({
-        containerID: 2,
-        containerName: 'pb-score-us',
-        content: ' 0',
-        xPosition: usX,
-        yPosition: 97,
-        width: 100,
-        height: 80,
+        containerID: 3,
+        containerName: 'pb-score',
+        content: scoreText,
+        xPosition: 10,
+        yPosition: 0, //17,
+        width: 320,
+        height: 160,
         isEventCapture: 1,
       }),
       new TextContainerProperty({
-        containerID: 3,
-        containerName: 'pb-score-them',
-        content: ' 0',
-        xPosition: themX,
-        yPosition: 17,
-        width: 100,
-        height: 80,
-        isEventCapture: 0,
-      }),
-      new TextContainerProperty({
         containerID: 4,
-        containerName: 'pb-setup',
-        content: getSetupHint(),
+        containerName: 'pb-footer',
+        content: footerText,
         xPosition: 4,
-        yPosition: 175,
-        width: 572,
+        yPosition: 185,
+        width: 568,
         height: 120,
         isEventCapture: 0,
       }),
@@ -221,8 +203,6 @@ function buildSetupContainers(imageKey: string) {
   }
 }
 
-const CHAR_WIDTH_PX = 5      // G2 fixed-width-ish font — tune if needed
-const IMAGE_RIGHT_PX = 175   // image xPosition (90) + image width (85)
 const HIT_MIN_PEAK    = 2000   // cheap peak gate: skip frames clearly too quiet to contain a hit
 const SAMPLE_RATE         = 16000  // G2 mic assumed 16 kHz
 const SUBFRAME_SAMPLES    = Math.round(SAMPLE_RATE * 5 / 1000)    // 80 — 5 ms RMS frames
@@ -233,64 +213,6 @@ const RALLY_END_MIN_MS    = 3000   // minimum rally-end timer delay
 const RALLY_END_CADENCE_X = 5      // rally ends after 5× average hit cadence (handles high lobs)
 const SPEECH_CAP_MS       = 1500   // faster rally-end cap when speech heuristic fires
 const SPEECH_VAR_MAX      = 0.15   // onset variance ratio below which we suspect speech
-
-function buildPlayContainers(s: GameState, statusText: string) {
-  const usWon   = s.mode === 'gameover' && s.myScore  > s.oppScore
-  const themWon = s.mode === 'gameover' && s.oppScore > s.myScore
-  const usX   = s.servingTeam === 'us'   ? 10 : 50
-  const themX = s.servingTeam === 'them' ? 10 : 50
-
-  const winPadUs   = Math.ceil((IMAGE_RIGHT_PX - usX)   / CHAR_WIDTH_PX)
-  const winPadThem = Math.ceil((IMAGE_RIGHT_PX - themX) / CHAR_WIDTH_PX)
-  const scoreUs   = s.myScore.toString().padStart(2, ' ')
-  const scoreThem = s.oppScore.toString().padStart(2, ' ')
-
-  return {
-    containerTotalNum: 4,
-    imageObject: [
-      new ImageContainerProperty({
-        containerID: 1,
-        containerName: 'pb-court-img',
-        xPosition: 90,
-        yPosition: 10,
-        width: 85,
-        height: 138,
-      }),
-    ],
-    textObject: [
-      new TextContainerProperty({
-        containerID: 2,
-        containerName: 'pb-score-us',
-        content: usWon ? scoreUs.padEnd(winPadUs, ' ') + 'WIN' : scoreUs,
-        xPosition: usX,
-        yPosition: 97,
-        width: 220,
-        height: 80,
-        isEventCapture: 1,
-      }),
-      new TextContainerProperty({
-        containerID: 3,
-        containerName: 'pb-score-them',
-        content: themWon ? scoreThem.padEnd(winPadThem, ' ') + 'WIN' : scoreThem,
-        xPosition: themX,
-        yPosition: 17,
-        width: 220,
-        height: 80,
-        isEventCapture: 0,
-      }),
-      new TextContainerProperty({
-        containerID: 4,
-        containerName: 'pb-status',
-        content: statusText,
-        xPosition: 4,
-        yPosition: 175,
-        width: 572,
-        height: 120,
-        isEventCapture: 0,
-      }),
-    ],
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Timer
@@ -306,11 +228,11 @@ function formatElapsed(s: GameState): string {
 
 
 async function tickTimer(b: EvenAppBridge): Promise<void> {
-  if (displayMode !== 'full') return
+  if (activeLayout !== 'full') return
   const content = `${formatElapsed(state)}\n${getPlayHint(state)}`
   await b.textContainerUpgrade(new TextContainerUpgrade({
     containerID: 4,
-    containerName: 'pb-status',
+    containerName: 'pb-footer',
     contentOffset: 0,
     contentLength: Math.max(1, content.length),
     content,
@@ -337,23 +259,6 @@ function compactScoreText(s: GameState): string {
   return `${servingScore}-${receivingScore}-${s.serverNumber}${win}`
 }
 
-function buildCompactContainer(s: GameState) {
-  return {
-    containerTotalNum: 1,
-    textObject: [
-      new TextContainerProperty({
-        containerID: 1,
-        containerName: 'pb-compact',
-        content: compactScoreText(s),
-        xPosition: 4,
-        yPosition: 4,
-        width: 572,
-        height: 288,
-        isEventCapture: 1,
-      }),
-    ],
-  }
-}
 
 function clearFullDisplayTimeout(): void {
   if (fullDisplayTimeoutId !== null) {
@@ -429,24 +334,23 @@ async function onRallyEnd(b: EvenAppBridge): Promise<void> {
 async function showRallyStatsBriefly(b: EvenAppBridge, hits: number, cadenceMs: number): Promise<void> {
   const line1 = `Rally: ${hits} hit${hits !== 1 ? 's' : ''}`
   const text  = cadenceMs > 0 ? `${line1}\n~${Math.round(cadenceMs)}ms avg` : line1
-  await b.rebuildPageContainer(new RebuildPageContainer({
-    containerTotalNum: 1,
-    textObject: [
-      new TextContainerProperty({
-        containerID: 1,
-        containerName: 'pb-rally-stats',
-        content: text,
-        xPosition: 4,
-        yPosition: 90,
-        width: 572,
-        height: 108,
-        isEventCapture: 1,
-      }),
-    ],
-  }))
+  const prevLayout = activeLayout
+  activeLayout = 'compact'  // block tickTimer during stats display
+  await Promise.all([
+    b.textContainerUpgrade(new TextContainerUpgrade({
+      containerID: 3, containerName: 'pb-score',
+      contentOffset: 0, contentLength: Math.max(1, text.length), content: text,
+    })),
+    b.textContainerUpgrade(new TextContainerUpgrade({
+      containerID: 4, containerName: 'pb-footer',
+      contentOffset: 0, contentLength: 1, content: ' ',
+    })),
+    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 1, containerName: 'pb-court-top', imageData: BLANK_HALF })),
+    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 2, containerName: 'pb-court-bottom', imageData: BLANK_HALF })),
+  ])
   await new Promise<void>(r => window.setTimeout(r, 3000))
-  if (displayMode === 'full') {
-    await renderPlay(b)
+  if (prevLayout === 'full') {
+    await renderFull(b)
   } else {
     await renderCompact(b, { keepMic: false })
   }
@@ -540,7 +444,7 @@ function processPcmFrame(pcm: Uint8Array, b: EvenAppBridge): void {
   }
 
   // 8. On hit: apply mode-specific behaviour
-  if (state.config.listenHideDisplay && displayMode !== 'compact') {
+  if (state.config.listenHideDisplay && activeLayout !== 'compact') {
     // keep mic alive only when stats tracking also wants it
     void renderCompact(b, { keepMic: state.config.listenDetectStats })
   }
@@ -550,93 +454,99 @@ function processPcmFrame(pcm: Uint8Array, b: EvenAppBridge): void {
   }
 }
 
-function buildBlankCompactContainer() {
-  return {
-    containerTotalNum: 1,
-    textObject: [
-      new TextContainerProperty({
-        containerID: 1,
-        containerName: 'pb-compact',
-        content: ' ',
-        xPosition: 4,
-        yPosition: 4,
-        width: 572,
-        height: 288,
-        isEventCapture: 1,
-      }),
-    ],
-  }
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+async function updateCourtImages(b: EvenAppBridge, imageKey: string): Promise<void> {
+  const [topIdx, bottomIdx] = COURT_HALF_INDICES[imageKey]
+  await Promise.all([
+    b.updateImageRawData(new ImageRawDataUpdate({
+      containerID: 1,
+      containerName: 'pb-court-top',
+      imageData: COURT_HALVES[topIdx],
+    })),
+    b.updateImageRawData(new ImageRawDataUpdate({
+      containerID: 2,
+      containerName: 'pb-court-bottom',
+      imageData: COURT_HALVES[bottomIdx],
+    })),
+  ])
 }
 
 async function renderCompact(b: EvenAppBridge, opts: { keepMic?: boolean } = {}): Promise<void> {
   clearFullDisplayTimeout()
   if (!opts.keepMic) stopAudioWatch(b)
-  displayMode = 'compact'
-  const cfg = state.config.showScoreOnCompact
-    ? buildCompactContainer(state)
-    : buildBlankCompactContainer()
-  await b.rebuildPageContainer(new RebuildPageContainer(cfg))
+  activeLayout = 'compact'  // block tickTimer before any awaits
+  const content = state.config.showScoreOnCompact ? compactScoreText(state) : ' '
+  await Promise.all([
+    b.textContainerUpgrade(new TextContainerUpgrade({
+      containerID: 3, containerName: 'pb-score',
+      contentOffset: 0, contentLength: Math.max(1, content.length), content,
+    })),
+    b.textContainerUpgrade(new TextContainerUpgrade({
+      containerID: 4, containerName: 'pb-footer',
+      contentOffset: 0, contentLength: 1, content: ' ',
+    })),
+    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 1, containerName: 'pb-court-top', imageData: BLANK_HALF })),
+    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 2, containerName: 'pb-court-bottom', imageData: BLANK_HALF })),
+  ])
+}
+
+async function renderFull(b: EvenAppBridge): Promise<void> {
+  const imageKey = state.mode === 'setup'
+    ? SERVE_OPTIONS[setupTeam][setupPos]
+    : getPlayImageKey(state)
+  const scoreText = state.mode === 'setup'
+    ? getScoreText(parseSetupOption(SERVE_OPTIONS[setupTeam][setupPos]).servingTeam, 0, 0, false)
+    : getScoreText(state.servingTeam, state.myScore, state.oppScore, state.mode === 'gameover')
+  const footerText = state.mode === 'setup'
+    ? getSetupHint()
+    : `${formatElapsed(state)}\n${getPlayHint(state)}`
+
+  if (!startupCreated) {
+    // First render ever — establish startup container layout on device
+    activeLayout = null
+    const cfg = buildContainers(scoreText, footerText)
+    await b.createStartUpPageContainer(new CreateStartUpPageContainer(cfg))
+    startupCreated = true
+    activeLayout = 'full'
+    await updateCourtImages(b, imageKey)
+  } else {
+    activeLayout = 'full'  // set before awaits so tickTimer is unblocked immediately
+    await Promise.all([
+      b.textContainerUpgrade(new TextContainerUpgrade({
+        containerID: 3,
+        containerName: 'pb-score',
+        contentOffset: 0,
+        contentLength: Math.max(1, scoreText.length),
+        content: scoreText,
+      })),
+      b.textContainerUpgrade(new TextContainerUpgrade({
+        containerID: 4,
+        containerName: 'pb-footer',
+        contentOffset: 0,
+        contentLength: Math.max(1, footerText.length),
+        content: footerText,
+      })),
+      updateCourtImages(b, imageKey),
+    ])
+  }
 }
 
 async function showFullBriefly(b: EvenAppBridge): Promise<void> {
   clearFullDisplayTimeout()
-  displayMode = 'full'
-  await renderPlay(b)
+  await renderFull(b)
   if (state.config.listenHideDisplay || state.config.listenDetectStats) {
     startAudioWatch(b)
   }
 
-  if (state.config.minimizeAfterSecs) {
+  if (state.config.minimizeAfterSecs && state.config.fullDisplaySecs) {
     fullDisplayTimeoutId = window.setTimeout(() => {
       fullDisplayTimeoutId = null
       void renderCompact(b, { keepMic: true })
     }, state.config.fullDisplaySecs * 1000)
   }
-}
-
-// ---------------------------------------------------------------------------
-// Rendering
-// ---------------------------------------------------------------------------
-
-async function renderCourtImage(b: EvenAppBridge, imageKey: string): Promise<void> {
-  const imageData = COURT_IMAGES[imageKey]
-  if (imageData === null) return
-  await b.updateImageRawData(new ImageRawDataUpdate({
-    containerID: 1,
-    containerName: 'pb-court-img',
-    imageData,
-  }))
-}
-
-async function renderPlayImage(b: EvenAppBridge, s: GameState): Promise<void> {
-  const key = getPlayImageKey(s);
-  await renderCourtImage(b, key);
-}
-
-async function renderSetup(b: EvenAppBridge): Promise<void> {
-  const key = SERVE_OPTIONS[setupTeam][setupPos]
-  const cfg = buildSetupContainers(key)
-  if (!startupRendered) {
-    await b.createStartUpPageContainer(new CreateStartUpPageContainer(cfg));
-    startupRendered = true;
-
-    const user = await b.getUserInfo();
-    console.log('[pickleball] user info:', user);
-  } else {
-    await b.rebuildPageContainer(new RebuildPageContainer(cfg))
-  }
-  await renderCourtImage(b, key)
-}
-
-async function renderPlay(b: EvenAppBridge): Promise<void> {
-  const cfg = buildPlayContainers(state, `${formatElapsed(state)}\n${getPlayHint(state)}`)
-  if (!startupRendered) {
-    await b.createStartUpPageContainer(new CreateStartUpPageContainer(cfg))
-    startupRendered = true
-  } else {
-    await b.rebuildPageContainer(new RebuildPageContainer(cfg))
-  }
-  await renderPlayImage(b, state)
 }
 
 // ---------------------------------------------------------------------------
@@ -647,13 +557,23 @@ function registerEventLoop(b: EvenAppBridge): void {
   if (eventLoopRegistered) return
 
   b.onEvenHubEvent(async (event: EvenHubEvent) => {
+    console.log('event', event);
+
     if (event.audioEvent?.audioPcm) {
       processPcmFrame(event.audioEvent.audioPcm, b)
       return
     }
 
-    const rawType = getRawEventType(event)
-    let eventType = normalizeEventType(rawType)
+    const rawType = getRawEventType(event);
+    console.log('rawType', rawType);
+
+    // ignore disconnected / mystery 7
+    if (rawType == 6 || rawType == 7) {
+      return;
+    }
+
+    let eventType = normalizeEventType(rawType);
+    console.log('eventType', eventType);
 
     // Fallback: event with no explicit type → treat as click
     if (eventType === undefined && (event.listEvent ?? event.textEvent)) {
@@ -663,10 +583,11 @@ function registerEventLoop(b: EvenAppBridge): void {
 
     switch (eventType) {
       case OsEventTypeList.SCROLL_TOP_EVENT:
+        console.log('UP');
         if (state.mode === 'setup') {
           if (setupTeam === 'them') setupPos = setupPos === 0 ? 1 : 0
           else { setupTeam = 'them'; setupPos = 0 }
-          await renderSetup(b)
+          await renderFull(b)
         } else {
           // Play or gameover: opponents won the rally
           const prevRallyHitsTop = rallyStats.length > 0 ? [...rallyStats] : undefined
@@ -680,10 +601,11 @@ function registerEventLoop(b: EvenAppBridge): void {
         break
 
       case OsEventTypeList.SCROLL_BOTTOM_EVENT:
+        console.log('DOWN');
         if (state.mode === 'setup') {
           if (setupTeam === 'us') setupPos = setupPos === 0 ? 1 : 0
           else { setupTeam = 'us'; setupPos = 0 }
-          await renderSetup(b)
+          await renderFull(b)
         } else {
           // Play or gameover: our team won the rally
           const prevRallyHitsBottom = rallyStats.length > 0 ? [...rallyStats] : undefined
@@ -700,18 +622,18 @@ function registerEventLoop(b: EvenAppBridge): void {
       // Setup: starts the game. Play/gameover: toggles compact ↔ full.
       case OsEventTypeList.CLICK_EVENT:
       case undefined:
+        console.log('CLICK');
         if (state.mode === 'setup') {
-          state = startGame(state, parseSetupOption(SERVE_OPTIONS[setupTeam][setupPos]))
-          startPlayTimer(b)
-          await showFullBriefly(b)
-          void playScoreAudio(state, () => state.config.readAloud)
-          panel.update()
+          state = startGame(state, parseSetupOption(SERVE_OPTIONS[setupTeam][setupPos]));
+          startPlayTimer(b);
+          await showFullBriefly(b);
+          void playScoreAudio(state, () => state.config.readAloud);
+          panel.update();
         } else {
-          if (displayMode === 'compact') {
+          if (activeLayout !== 'full') {
             // for toggle without restarting timeout and audio
             clearFullDisplayTimeout()
-            displayMode = 'full'
-            await renderPlay(b)
+            await renderFull(b)
 
           } else {
             await renderCompact(b)
@@ -720,6 +642,7 @@ function registerEventLoop(b: EvenAppBridge): void {
         break
 
       case OsEventTypeList.DOUBLE_CLICK_EVENT: {
+        console.log('DOUBLE CLICK');
         if (state.mode === 'setup') {
           await b.shutDownPageContainer(1)
           return
@@ -735,8 +658,7 @@ function registerEventLoop(b: EvenAppBridge): void {
           stopPlayTimer()
           clearFullDisplayTimeout()
           stopAudioWatch(b)
-          displayMode = 'compact'
-          await renderSetup(b)
+          await renderFull(b)
         } else if (prevMode === 'play' && state.mode === 'play') {
           await showFullBriefly(b)
         }
@@ -769,12 +691,35 @@ async function main(): Promise<void> {
   state = createInitialState(loadConfig())
 
   try {
-    bridge = await withTimeout(waitForEvenAppBridge(), 6000)
+    //bridge = await withTimeout(waitForEvenAppBridge(), 6000)
+    bridge = await waitForEvenAppBridge();
+
     console.log('[pickleball] bridge ready')
   } catch {
     console.warn('[pickleball] bridge unavailable — phone panel only (mock mode)')
   }
 
+  if (bridge) {
+    const unsubscribe = bridge.onDeviceStatusChanged((status) => {
+      if (status.connectType === DeviceConnectType.Connected) {
+        console.log('Device connected!', status.batteryLevel);
+      } else {
+        console.log('Device not connected!', status.batteryLevel);
+      }
+    });
+
+    const user = await bridge.getUserInfo();
+    console.log('[pickleball] user info:', user);
+  }
+
+  if (bridge) {
+    console.log(1);
+    await renderFull(bridge);
+    console.log(2);
+    registerEventLoop(bridge);
+    console.log(3);
+  }
+  
   panel = mountPhonePanel(document.getElementById('app')!, {
     getState: () => state,
     getCurrentRallyHits: () => rallyStats,
@@ -789,8 +734,7 @@ async function main(): Promise<void> {
         stopPlayTimer()
         clearFullDisplayTimeout()
         if (bridge) stopAudioWatch(bridge)
-        displayMode = 'compact'
-        if (bridge) void renderSetup(bridge)
+        if (bridge) void renderFull(bridge)
       } else if (prevMode === 'play' && state.mode === 'play') {
         if (bridge) void showFullBriefly(bridge)
       }
@@ -805,10 +749,6 @@ async function main(): Promise<void> {
   })
   panel.update()
 
-  if (bridge) {
-    await renderSetup(bridge);
-    registerEventLoop(bridge);
-  }
 }
 
 main().catch(console.error)
