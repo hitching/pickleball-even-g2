@@ -1,16 +1,4 @@
 /**
-*             ███           █████      ████               █████
-*            ░░░           ░░███      ░░███              ░░███ 
-*  ████████  ████   ██████  ░███ █████ ░███   ██████   ███████ 
-* ░░███░░███░░███  ███░░███ ░███░░███  ░███  ███░░███ ███░░███ 
-*  ░███ ░███ ░███ ░███ ░░░  ░██████░   ░███ ░███████ ░███ ░███ 
-*  ░███ ░███ ░███ ░███  ███ ░███░░███  ░███ ░███░░░  ░███ ░███ 
-*  ░███████  █████░░██████  ████ █████ █████░░██████ ░░████████
-*  ░███░░░  ░░░░░  ░░░░░░  ░░░░ ░░░░░ ░░░░░  ░░░░░░   ░░░░░░░░ 
-*  ░███                                                        
-*  █████                                                       
-* ░░░░░                                                        
-* 
 * Pickleball scorekeeper and coaching for the G2 smart glasses.
 * Designed and developed by Bob Hitching.
 */
@@ -19,6 +7,7 @@ import {
   CreateStartUpPageContainer,
   ImageContainerProperty,
   ImageRawDataUpdate,
+  ImuReportPace,
   OsEventTypeList,
   TextContainerProperty,
   TextContainerUpgrade,
@@ -27,6 +16,17 @@ import {
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk'
 import { SERVE_OPTIONS, COURT_HALVES, COURT_HALF_INDICES, BLANK_HALF } from './court-images'
+
+/** Decode a base64 PNG string to raw PNG bytes for updateImageRawData */
+function b64toBytes(b64: string): number[] {
+  const bin = atob(b64)
+  const bytes = new Array<number>(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return bytes
+}
+
+const COURT_HALVES_BYTES: number[][] = COURT_HALVES.map(b64toBytes)
+const BLANK_HALF_BYTES: number[] = b64toBytes(BLANK_HALF)
 import './styles.css'
 import '@jappyjan/even-realities-ui/styles.css'
 import {
@@ -65,12 +65,29 @@ let audioActive = false       // monitoring mic activity for dynamic rally-end t
 // per-rally audio tracking state (reset on each mic activation via resetRallyState)
 let audioFrameCount     = 0
 let pcmTail             = new Int16Array(0)
-let lastHitTimestamp    = 0
 let rallyHitTimestamps: number[] = []
 let rallyEndTimerId: number | null = null
 let rallyStats: RallyHit[] = []
 let completedRallies: CompletedRally[] = []
 let panel: PhonePanelHandle = { update: () => {} }
+
+// IMU state
+let imuActive = false
+let imuDataReceived = false              // stays false in simulator; set true on first IMU sample
+const imuBuffer: { mag: number; t: number }[] = []
+
+// Hit confirmation state machine
+type HitState = 'idle' | 'pending_imu'
+let hitState: HitState = 'idle'
+let hitPendingTimerId: ReturnType<typeof setTimeout> | null = null
+let pendingAudioTs = 0
+let pendingAudioPeak = 0
+let pendingAudioAttackMs = 0
+let lastConfirmedHitTs = 0
+
+// Serve candidate: audio-only (no IMU) first hit buffered until return is confirmed
+let serveCandidateTs: number | null = null
+let serveCandidateTTLId: ReturnType<typeof setTimeout> | null = null
 
 // ---------------------------------------------------------------------------
 // Event type normalization (timer-app pattern)
@@ -207,12 +224,19 @@ const HIT_MIN_PEAK    = 2000   // cheap peak gate: skip frames clearly too quiet
 const SAMPLE_RATE         = 16000  // G2 mic assumed 16 kHz
 const SUBFRAME_SAMPLES    = Math.round(SAMPLE_RATE * 5 / 1000)    // 80 — 5 ms RMS frames
 const TAIL_SAMPLES        = Math.round(SAMPLE_RATE * 20 / 1000)   // 320 — 20 ms cross-frame overlap
-const HIT_DEBOUNCE_MS     = 250    // ignore new hits within 250 ms of the last
 const ONSET_N_STDDEV      = 2.5    // adaptive threshold multiplier: mean + N×σ
 const RALLY_END_MIN_MS    = 3000   // minimum rally-end timer delay
 const RALLY_END_CADENCE_X = 5      // rally ends after 5× average hit cadence (handles high lobs)
 const SPEECH_CAP_MS       = 1500   // faster rally-end cap when speech heuristic fires
 const SPEECH_VAR_MAX      = 0.15   // onset variance ratio below which we suspect speech
+
+// IMU hit-confirmation state machine constants
+const IMU_REPORT_PACE         = ImuReportPace.P100  // fastest reporting rate
+const IMU_WINDOW_MS           = 50                  // rolling window for peak magnitude (ms)
+const IMU_PENDING_TIMEOUT_MS  = 150                 // max wait after audio attack for IMU spike
+const IMU_HIT_THRESHOLD       = 2.5                 // g-force magnitude to confirm hit (tune empirically)
+const IMU_DEBOUNCE_MS         = 200                 // min time between confirmed hits
+const SERVE_CANDIDATE_TTL_MS  = 8000                // max time to receive return after serve buffered
 
 // ---------------------------------------------------------------------------
 // Timer
@@ -254,9 +278,9 @@ function stopPlayTimer(): void {
 function compactScoreText(s: GameState): string {
   const servingScore   = s.servingTeam === 'us' ? s.myScore  : s.oppScore
   const receivingScore = s.servingTeam === 'us' ? s.oppScore : s.myScore
-  const win = s.mode === 'gameover' ? ' WIN' : ''
+  //const win = s.mode === 'gameover' ? ' WIN' : ''
 
-  return `${servingScore}-${receivingScore}-${s.serverNumber}${win}`
+  return `${servingScore}-${receivingScore}-${s.serverNumber}`
 }
 
 
@@ -271,18 +295,125 @@ function stopAudioWatch(b: EvenAppBridge): void {
   if (audioActive) {
     void b.audioControl(false)
     audioActive = false
+    stopImuWatch(b)
   }
+}
+
+function cancelPendingHit(): void {
+  if (hitPendingTimerId !== null) {
+    clearTimeout(hitPendingTimerId)
+    hitPendingTimerId = null
+  }
+  hitState = 'idle'
+}
+
+function clearServeCandidate(): void {
+  if (serveCandidateTTLId !== null) {
+    clearTimeout(serveCandidateTTLId)
+    serveCandidateTTLId = null
+  }
+  serveCandidateTs = null
 }
 
 function resetRallyState(): void {
   audioFrameCount    = 0
   pcmTail            = new Int16Array(0)
-  lastHitTimestamp   = 0
   rallyHitTimestamps = []
   rallyStats         = []
   if (rallyEndTimerId !== null) {
     window.clearTimeout(rallyEndTimerId)
     rallyEndTimerId = null
+  }
+  cancelPendingHit()
+  clearServeCandidate()
+  lastConfirmedHitTs = 0
+}
+
+/**
+ * Returns peak IMU magnitude in the last IMU_WINDOW_MS.
+ * Returns Infinity when no IMU data received yet (simulator mode),
+ * so all IMU threshold checks pass and audio-only detection is used.
+ */
+function peakImuMagnitude(): number {
+  if (!imuDataReceived) return Infinity
+  const cutoff = Date.now() - IMU_WINDOW_MS
+  let peak = 0
+  for (const s of imuBuffer) {
+    if (s.t >= cutoff && s.mag > peak) peak = s.mag
+  }
+  return peak
+}
+
+/**
+ * Called when both audio attack and IMU spike confirm a hit.
+ * If a serve candidate is buffered, inserts it first (retroactive).
+ */
+function confirmHit(): void {
+  const ts    = pendingAudioTs
+  const peak  = pendingAudioPeak
+  const atk   = pendingAudioAttackMs
+  cancelPendingHit()
+  lastConfirmedHitTs = Date.now()
+
+  if (serveCandidateTs !== null) {
+    console.log(`[hit] retroactive serve insert @ ${serveCandidateTs}`)
+    const sts = serveCandidateTs
+    clearServeCandidate()
+    onHitConfirmed(sts, 0, 0)
+  }
+
+  console.log(`[hit] confirmed @ ${ts}`)
+  onHitConfirmed(ts, peak, atk)
+}
+
+function handleImuData(x: number, y: number, z: number): void {
+  imuDataReceived = true
+  const mag = Math.sqrt(x * x + y * y + z * z)
+  console.log('mag',mag);
+  const now = Date.now()
+  imuBuffer.push({ mag, t: now })
+  while (imuBuffer.length > 20) imuBuffer.shift()
+
+  if (hitState === 'pending_imu' && mag >= IMU_HIT_THRESHOLD) {
+    if (now - lastConfirmedHitTs >= IMU_DEBOUNCE_MS) {
+      confirmHit()
+    }
+  }
+}
+
+function startImuWatch(b: EvenAppBridge): void {
+  imuActive = true
+  imuDataReceived = false
+  imuBuffer.length = 0
+  void b.imuControl(true, IMU_REPORT_PACE)
+}
+
+function stopImuWatch(b: EvenAppBridge): void {
+  if (imuActive) {
+    imuActive = false
+    void b.imuControl(false, IMU_REPORT_PACE)
+    imuBuffer.length = 0
+    cancelPendingHit()
+    clearServeCandidate()
+  }
+}
+
+/**
+ * Records a confirmed hit and applies mode-specific behaviours.
+ * Called from confirmHit() (normal path) or directly for retroactive serve inserts.
+ */
+function onHitConfirmed(ts: number, peak: number, attackMs: number): void {
+  rallyHitTimestamps.push(ts)
+  rallyStats.push({ timestamp: ts, peakAmplitude: peak, attackMs })
+  panel.update()
+
+  const b = bridge
+  if (!b) return
+  if (state.config.listenHideDisplay && activeLayout !== 'compact') {
+    void renderCompact(b, { keepMic: state.config.listenDetectStats })
+  }
+  if (state.config.listenDetectStats) {
+    scheduleRallyEnd(b)
   }
 }
 
@@ -291,6 +422,7 @@ function startAudioWatch(b: EvenAppBridge): void {
   resetRallyState()
   audioActive = true
   void b.audioControl(true)
+  startImuWatch(b)
 }
 
 function scheduleRallyEnd(b: EvenAppBridge, capMs?: number): void {
@@ -339,14 +471,14 @@ async function showRallyStatsBriefly(b: EvenAppBridge, hits: number, cadenceMs: 
   await Promise.all([
     b.textContainerUpgrade(new TextContainerUpgrade({
       containerID: 3, containerName: 'pb-score',
-      contentOffset: 0, contentLength: Math.max(1, text.length), content: text,
+      contentOffset: 0, contentLength: 1, content: ' ',
     })),
     b.textContainerUpgrade(new TextContainerUpgrade({
       containerID: 4, containerName: 'pb-footer',
-      contentOffset: 0, contentLength: 1, content: ' ',
+      contentOffset: 0, contentLength: Math.max(1, text.length), content: text,
     })),
-    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 1, containerName: 'pb-court-top', imageData: BLANK_HALF })),
-    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 2, containerName: 'pb-court-bottom', imageData: BLANK_HALF })),
+    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 1, containerName: 'pb-court-top', imageData: BLANK_HALF_BYTES })),
+    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 2, containerName: 'pb-court-bottom', imageData: BLANK_HALF_BYTES })),
   ])
   await new Promise<void>(r => window.setTimeout(r, 3000))
   if (prevLayout === 'full') {
@@ -406,31 +538,29 @@ function processPcmFrame(pcm: Uint8Array, b: EvenAppBridge): void {
   const oStd  = Math.sqrt(Math.max(0, oSumSq / oc - oMean ** 2))
   const threshold = oMean + ONSET_N_STDDEV * oStd
 
-  // 7. Find first onset peak above adaptive threshold, with 250 ms debounce
+  // 7. Find first onset peak above adaptive threshold
   const now = Date.now()
-  let hitDetected = false
+  let audioAttackDetected = false
+  let detectedAttackMs = 0
   for (let i = 1; i < nf; i++) {
     if (onset[i] <= threshold) continue
-    if (now - lastHitTimestamp < HIT_DEBOUNCE_MS) break
+    // Debounce: skip if already pending IMU confirmation or recently confirmed
+    if (hitState !== 'idle' || now - lastConfirmedHitTs < IMU_DEBOUNCE_MS) break
 
     // Attack time: count sub-frames from <10% of onset[i] rising to this peak
     let attackStart = i
     for (let k = i - 1; k >= 1; k--) { if (onset[k] < onset[i] * 0.1) break; attackStart = k }
-    const attackMs = (i - attackStart) * 5  // 5 ms per sub-frame
+    detectedAttackMs = (i - attackStart) * 5  // 5 ms per sub-frame
 
-    lastHitTimestamp = now
-    rallyHitTimestamps.push(now)
-    rallyStats.push({ timestamp: now, peakAmplitude: peak, attackMs })
-    panel.update()
     console.log(
-      `[pickleball] hit peak=${peak} onset=${onset[i].toFixed(1)} ` +
-      `thresh=${threshold.toFixed(1)} attack=${attackMs}ms`,
+      `[pickleball] audio attack peak=${peak} onset=${onset[i].toFixed(1)} ` +
+      `thresh=${threshold.toFixed(1)} attack=${detectedAttackMs}ms`,
     )
-    hitDetected = true
-    break  // at most one hit detected per 100 ms frame
+    audioAttackDetected = true
+    break  // at most one hit per frame
   }
 
-  if (!hitDetected) {
+  if (!audioAttackDetected) {
     // Speech heuristic: low onset variance + sustained energy → faster rally-end
     if (rallyHitTimestamps.length > 0) {
       let eSum = 0; for (let i = 0; i < nf; i++) eSum += energy[i]
@@ -443,14 +573,36 @@ function processPcmFrame(pcm: Uint8Array, b: EvenAppBridge): void {
     return
   }
 
-  // 8. On hit: apply mode-specific behaviour
-  if (state.config.listenHideDisplay && activeLayout !== 'compact') {
-    // keep mic alive only when stats tracking also wants it
-    void renderCompact(b, { keepMic: state.config.listenDetectStats })
-  }
+  // 8. Audio attack detected — enter state machine
+  const hasRecentImu = peakImuMagnitude() >= IMU_HIT_THRESHOLD
 
-  if (state.config.listenDetectStats) {
-    scheduleRallyEnd(b)
+  if (!hasRecentImu && serveCandidateTs === null && rallyHitTimestamps.length === 0) {
+    // No IMU movement, no existing candidate, first hit of rally:
+    // buffer as serve candidate (partner's back-role serve)
+    serveCandidateTs = now
+    serveCandidateTTLId = setTimeout(() => {
+      console.log('[hit] serve candidate expired (no return)')
+      clearServeCandidate()
+    }, SERVE_CANDIDATE_TTL_MS)
+    console.log('[hit] serve candidate buffered')
+  } else {
+    // Normal path: wait for IMU spike to confirm
+    hitState = 'pending_imu'
+    pendingAudioTs       = now
+    pendingAudioPeak     = peak
+    pendingAudioAttackMs = detectedAttackMs
+    console.log('[hit] audio attack, awaiting IMU spike...')
+    hitPendingTimerId = setTimeout(() => {
+      if (!imuDataReceived) {
+        // Simulator: no IMU available — confirm on audio alone
+        console.log('[hit] simulator mode: audio-only confirm')
+        confirmHit()
+      } else {
+        console.log('[hit] IMU timeout — discarding (false positive)')
+      }
+      hitState = 'idle'
+      hitPendingTimerId = null
+    }, IMU_PENDING_TIMEOUT_MS)
   }
 }
 
@@ -460,16 +612,19 @@ function processPcmFrame(pcm: Uint8Array, b: EvenAppBridge): void {
 
 async function updateCourtImages(b: EvenAppBridge, imageKey: string): Promise<void> {
   const [topIdx, bottomIdx] = COURT_HALF_INDICES[imageKey]
+
+  console.log('updateCourtImages', imageKey, topIdx, bottomIdx);
+
   await Promise.all([
     b.updateImageRawData(new ImageRawDataUpdate({
       containerID: 1,
       containerName: 'pb-court-top',
-      imageData: COURT_HALVES[topIdx],
+      imageData: COURT_HALVES_BYTES[topIdx],
     })),
     b.updateImageRawData(new ImageRawDataUpdate({
       containerID: 2,
       containerName: 'pb-court-bottom',
-      imageData: COURT_HALVES[bottomIdx],
+      imageData: COURT_HALVES_BYTES[bottomIdx],
     })),
   ])
 }
@@ -488,8 +643,8 @@ async function renderCompact(b: EvenAppBridge, opts: { keepMic?: boolean } = {})
       containerID: 4, containerName: 'pb-footer',
       contentOffset: 0, contentLength: 1, content: ' ',
     })),
-    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 1, containerName: 'pb-court-top', imageData: BLANK_HALF })),
-    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 2, containerName: 'pb-court-bottom', imageData: BLANK_HALF })),
+    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 1, containerName: 'pb-court-top', imageData: BLANK_HALF_BYTES })),
+    b.updateImageRawData(new ImageRawDataUpdate({ containerID: 2, containerName: 'pb-court-bottom', imageData: BLANK_HALF_BYTES })),
   ])
 }
 
@@ -507,11 +662,15 @@ async function renderFull(b: EvenAppBridge): Promise<void> {
   if (!startupCreated) {
     // First render ever — establish startup container layout on device
     activeLayout = null
-    const cfg = buildContainers(scoreText, footerText)
+    const cfg = buildContainers(scoreText, footerText);
+    console.log(cfg);
     await b.createStartUpPageContainer(new CreateStartUpPageContainer(cfg))
+    console.log(1.01);
     startupCreated = true
     activeLayout = 'full'
-    await updateCourtImages(b, imageKey)
+    console.log(1.1);
+    await updateCourtImages(b, imageKey);
+    console.log(1.2);
   } else {
     activeLayout = 'full'  // set before awaits so tickTimer is unblocked immediately
     await Promise.all([
@@ -558,6 +717,13 @@ function registerEventLoop(b: EvenAppBridge): void {
 
   b.onEvenHubEvent(async (event: EvenHubEvent) => {
     console.log('event', event);
+
+    // IMU data report — handle before gesture/audio switch
+    if (imuActive && event.sysEvent?.imuData) {
+      const { x = 0, y = 0, z = 0 } = event.sysEvent.imuData
+      handleImuData(x, y, z)
+      return
+    }
 
     if (event.audioEvent?.audioPcm) {
       processPcmFrame(event.audioEvent.audioPcm, b)
